@@ -1,0 +1,3 @@
+/target
+# build container for systems without hdf5-dev (e.g. immutable distros)
+Dockerfile
