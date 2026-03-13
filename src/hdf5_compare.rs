@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -14,12 +15,12 @@ const HDF5_MEDIA_TYPES: &[&str] = &["application/x-hdf5", "application/x-hdf"];
 struct DatasetMeta {
     shape: Vec<usize>,
     dtype: String,
-    num_attrs: usize,
+    attr_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 struct GroupMeta {
-    num_attrs: usize,
+    attr_names: Vec<String>,
     num_datasets: usize,
 }
 
@@ -27,6 +28,32 @@ struct GroupMeta {
 enum EntryMeta {
     Group(GroupMeta),
     Dataset(DatasetMeta),
+}
+
+impl EntryMeta {
+    fn attr_names(&self) -> &[String] {
+        match self {
+            EntryMeta::Group(g) => &g.attr_names,
+            EntryMeta::Dataset(d) => &d.attr_names,
+        }
+    }
+}
+
+// domain-specific data for the extract chain, passed via ReopenedData::Custom
+#[derive(Debug, Clone)]
+pub struct Hdf5DataPair {
+    left: Option<BTreeMap<String, EntryMeta>>,
+    right: Option<BTreeMap<String, EntryMeta>>,
+}
+
+impl CustomReopenedData for Hdf5DataPair {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn clone_boxed(&self) -> Box<dyn CustomReopenedData> {
+        Box::new(self.clone())
+    }
 }
 
 fn open_h5(path: &Path) -> BinocResult<hdf5::File> {
@@ -52,14 +79,14 @@ fn walk_group(
         .groups()
         .map_err(|e| BinocError::Other(format!("hdf5: {e}")))?;
 
-    let num_attrs = group.attr_names().map(|v| v.len()).unwrap_or(0);
+    let attr_names = group.attr_names().unwrap_or_default();
 
     // skip root group -- it maps to the file-level node
     if name != "/" {
         entries.insert(
             name,
             EntryMeta::Group(GroupMeta {
-                num_attrs,
+                attr_names,
                 num_datasets: datasets.len(),
             }),
         );
@@ -71,13 +98,13 @@ fn walk_group(
             .dtype()
             .map(|dt| format!("{dt}"))
             .unwrap_or_else(|_| "unknown".into());
-        let ds_attrs = ds.attr_names().map(|v| v.len()).unwrap_or(0);
+        let ds_attr_names = ds.attr_names().unwrap_or_default();
         entries.insert(
             ds.name(),
             EntryMeta::Dataset(DatasetMeta {
                 shape,
                 dtype,
-                num_attrs: ds_attrs,
+                attr_names: ds_attr_names,
             }),
         );
     }
@@ -121,9 +148,39 @@ impl Comparator for Hdf5Comparator {
         HDF5_MEDIA_TYPES
     }
 
-    fn compare(&self, pair: &ItemPair, _ctx: &CompareContext) -> BinocResult<CompareResult> {
+    fn reopen_data(&self, pair: &ItemPair, _ctx: &CompareContext) -> BinocResult<ReopenedData> {
+        let left = pair
+            .left
+            .as_ref()
+            .map(|item| read_inventory(&item.physical_path))
+            .transpose()?;
+        let right = pair
+            .right
+            .as_ref()
+            .map(|item| read_inventory(&item.physical_path))
+            .transpose()?;
+        Ok(ReopenedData::Custom(Box::new(Hdf5DataPair {
+            left,
+            right,
+        })))
+    }
+
+    fn extract(
+        &self,
+        data: &ReopenedData,
+        node: &DiffNode,
+        aspect: &str,
+    ) -> Option<ExtractResult> {
+        let ReopenedData::Custom(boxed) = data else {
+            return None;
+        };
+        let pair = boxed.as_any().downcast_ref::<Hdf5DataPair>()?;
+        hdf5_extract(pair, node, aspect)
+    }
+
+    fn compare(&self, pair: &ItemPair, ctx: &CompareContext) -> BinocResult<CompareResult> {
         match (&pair.left, &pair.right) {
-            (Some(left), Some(right)) => self.compare_both(left, right, pair.logical_path()),
+            (Some(left), Some(right)) => self.compare_both(left, right, pair.logical_path(), ctx),
             (None, Some(right)) => {
                 let inv = read_inventory(&right.physical_path)?;
                 let n_groups = inv
@@ -185,6 +242,7 @@ impl Hdf5Comparator {
         left: &Item,
         right: &Item,
         logical_path: &str,
+        ctx: &CompareContext,
     ) -> BinocResult<CompareResult> {
         let inv_l = read_inventory(&left.physical_path)?;
         let inv_r = read_inventory(&right.physical_path)?;
@@ -217,6 +275,14 @@ impl Hdf5Comparator {
         if children.is_empty() {
             return Ok(CompareResult::Identical);
         }
+
+        ctx.cache_data(
+            logical_path,
+            ReopenedData::Custom(Box::new(Hdf5DataPair {
+                left: Some(inv_l.clone()),
+                right: Some(inv_r.clone()),
+            })),
+        );
 
         let node = DiffNode::new("modify", "hdf5_file", logical_path)
             .with_children(children)
@@ -267,7 +333,7 @@ fn diff_dataset(
 ) -> Option<DiffNode> {
     let shape_changed = left.shape != right.shape;
     let dtype_changed = left.dtype != right.dtype;
-    let attrs_changed = left.num_attrs != right.num_attrs;
+    let attrs_changed = left.attr_names != right.attr_names;
 
     if !shape_changed && !dtype_changed && !attrs_changed {
         return None;
@@ -278,8 +344,8 @@ fn diff_dataset(
         .with_detail("shape_right", serde_json::json!(right.shape))
         .with_detail("dtype_left", serde_json::json!(&left.dtype))
         .with_detail("dtype_right", serde_json::json!(&right.dtype))
-        .with_detail("attrs_left", serde_json::json!(left.num_attrs))
-        .with_detail("attrs_right", serde_json::json!(right.num_attrs));
+        .with_detail("attrs_left", serde_json::json!(left.attr_names.len()))
+        .with_detail("attrs_right", serde_json::json!(right.attr_names.len()));
 
     if shape_changed {
         node.tags.insert("binoc-hdf5.shape-change".into());
@@ -305,7 +371,7 @@ fn diff_dataset(
         parts.push(format!("type {} \u{2192} {}", left.dtype, right.dtype));
     }
     if attrs_changed {
-        let diff = right.num_attrs as i64 - left.num_attrs as i64;
+        let diff = right.attr_names.len() as i64 - left.attr_names.len() as i64;
         if diff > 0 {
             parts.push(format!(
                 "{diff} attr{} added",
@@ -330,13 +396,13 @@ fn diff_group(
     left: &GroupMeta,
     right: &GroupMeta,
 ) -> Option<DiffNode> {
-    let attrs_changed = left.num_attrs != right.num_attrs;
+    let attrs_changed = left.attr_names != right.attr_names;
 
     if !attrs_changed {
         return None;
     }
 
-    let diff = right.num_attrs as i64 - left.num_attrs as i64;
+    let diff = right.attr_names.len() as i64 - left.attr_names.len() as i64;
     let summary = if diff > 0 {
         format!(
             "{diff} attribute{} added",
@@ -352,8 +418,8 @@ fn diff_group(
 
     let mut node = DiffNode::new("modify", "hdf5_group", logical_path)
         .with_summary(capitalize(&summary))
-        .with_detail("attrs_left", serde_json::json!(left.num_attrs))
-        .with_detail("attrs_right", serde_json::json!(right.num_attrs));
+        .with_detail("attrs_left", serde_json::json!(left.attr_names.len()))
+        .with_detail("attrs_right", serde_json::json!(right.attr_names.len()));
 
     node.tags.insert("binoc-hdf5.attr-change".into());
     Some(node)
@@ -372,14 +438,14 @@ fn added_entry(file_logical: &str, h5_path: &str, meta: &EntryMeta) -> DiffNode 
             .with_tag("binoc.schema-change")
             .with_detail("shape", serde_json::json!(ds.shape))
             .with_detail("dtype", serde_json::json!(&ds.dtype))
-            .with_detail("num_attrs", serde_json::json!(ds.num_attrs)),
+            .with_detail("num_attrs", serde_json::json!(ds.attr_names.len())),
         EntryMeta::Group(gr) => DiffNode::new("add", "hdf5_group", &path)
             .with_summary(format!(
                 "Group added ({} dataset{}, {} attr{})",
                 gr.num_datasets,
                 if gr.num_datasets == 1 { "" } else { "s" },
-                gr.num_attrs,
-                if gr.num_attrs == 1 { "" } else { "s" },
+                gr.attr_names.len(),
+                if gr.attr_names.len() == 1 { "" } else { "s" },
             ))
             .with_tag("binoc-hdf5.group-addition")
             .with_tag("binoc.schema-change"),
@@ -399,17 +465,111 @@ fn removed_entry(file_logical: &str, h5_path: &str, meta: &EntryMeta) -> DiffNod
             .with_tag("binoc.schema-change")
             .with_detail("shape", serde_json::json!(ds.shape))
             .with_detail("dtype", serde_json::json!(&ds.dtype))
-            .with_detail("num_attrs", serde_json::json!(ds.num_attrs)),
+            .with_detail("num_attrs", serde_json::json!(ds.attr_names.len())),
         EntryMeta::Group(gr) => DiffNode::new("remove", "hdf5_group", &path)
             .with_summary(format!(
                 "Group removed ({} dataset{}, {} attr{})",
                 gr.num_datasets,
                 if gr.num_datasets == 1 { "" } else { "s" },
-                gr.num_attrs,
-                if gr.num_attrs == 1 { "" } else { "s" },
+                gr.attr_names.len(),
+                if gr.attr_names.len() == 1 { "" } else { "s" },
             ))
             .with_tag("binoc-hdf5.group-removal")
             .with_tag("binoc.schema-change"),
+    }
+}
+
+// find the inventory entry matching a DiffNode's path
+fn find_entry_for_node<'a>(
+    inv: &'a BTreeMap<String, EntryMeta>,
+    node_path: &str,
+) -> Option<(&'a str, &'a EntryMeta)> {
+    inv.iter()
+        .find(|(h5_path, _)| {
+            let trimmed = h5_path.trim_start_matches('/');
+            !trimmed.is_empty() && node_path.ends_with(trimmed)
+        })
+        .map(|(k, v)| (k.as_str(), v))
+}
+
+fn format_entry_line(h5_path: &str, meta: &EntryMeta) -> String {
+    match meta {
+        EntryMeta::Group(g) => format!(
+            "  [group] {} ({} attrs)\n",
+            h5_path,
+            g.attr_names.len()
+        ),
+        EntryMeta::Dataset(d) => format!(
+            "  [dataset] {} {} {} ({} attrs)\n",
+            h5_path,
+            fmt_shape(&d.shape),
+            d.dtype,
+            d.attr_names.len()
+        ),
+    }
+}
+
+fn hdf5_extract(pair: &Hdf5DataPair, node: &DiffNode, aspect: &str) -> Option<ExtractResult> {
+    match aspect {
+        "schema" => {
+            let mut out = String::new();
+            if let Some(left) = &pair.left {
+                out.push_str("--- left\n");
+                for (path, meta) in left {
+                    out.push_str(&format_entry_line(path, meta));
+                }
+            }
+            if let Some(right) = &pair.right {
+                out.push_str("+++ right\n");
+                for (path, meta) in right {
+                    out.push_str(&format_entry_line(path, meta));
+                }
+            }
+            Some(ExtractResult::Text(out))
+        }
+        "attributes" => {
+            let mut out = String::new();
+            if let Some(left) = &pair.left {
+                if let Some((_, meta)) = find_entry_for_node(left, &node.path) {
+                    out.push_str("--- left\n");
+                    for attr in meta.attr_names() {
+                        out.push_str(&format!("  {attr}\n"));
+                    }
+                }
+            }
+            if let Some(right) = &pair.right {
+                if let Some((_, meta)) = find_entry_for_node(right, &node.path) {
+                    out.push_str("+++ right\n");
+                    for attr in meta.attr_names() {
+                        out.push_str(&format!("  {attr}\n"));
+                    }
+                }
+            }
+            if out.is_empty() {
+                return None;
+            }
+            Some(ExtractResult::Text(out))
+        }
+        "dataset_info" => {
+            let mut out = String::new();
+            for (label, inv) in [("left", &pair.left), ("right", &pair.right)] {
+                if let Some(inv) = inv {
+                    if let Some((_, EntryMeta::Dataset(ds))) =
+                        find_entry_for_node(inv, &node.path)
+                    {
+                        out.push_str(&format!("--- {label}\n"));
+                        out.push_str(&format!("  shape: {}\n", fmt_shape(&ds.shape)));
+                        out.push_str(&format!("  dtype: {}\n", ds.dtype));
+                        out.push_str(&format!("  attrs: {}\n", ds.attr_names.join(", ")));
+                    }
+                }
+            }
+            if out.is_empty() {
+                return None;
+            }
+            Some(ExtractResult::Text(out))
+        }
+        _ => None,
     }
 }
 
@@ -639,6 +799,129 @@ mod tests {
             }
             _ => panic!("expected Leaf"),
         }
+    }
+
+    #[test]
+    fn extract_schema_via_custom_reopened_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.h5");
+        let b = dir.path().join("b.h5");
+
+        create_test_file(&a, |f| {
+            let g = f.create_group("data").unwrap();
+            g.new_dataset_builder()
+                .with_data(&[1.0f64, 2.0])
+                .create("x")
+                .unwrap();
+        });
+        create_test_file(&b, |f| {
+            let g = f.create_group("data").unwrap();
+            g.new_dataset_builder()
+                .with_data(&[1.0f64, 2.0, 3.0])
+                .create("x")
+                .unwrap();
+            g.new_dataset_builder()
+                .with_data(&[4.0f64, 5.0])
+                .create("y")
+                .unwrap();
+        });
+
+        let cmp = Hdf5Comparator;
+        let ctx = CompareContext::new();
+        let pair = make_pair(&a, &b, "test.h5");
+
+        // compare populates the cache
+        let result = cmp.compare(&pair, &ctx).unwrap();
+        let node = match result {
+            CompareResult::Leaf(n) => n,
+            _ => panic!("expected Leaf"),
+        };
+
+        // reopen_data returns Custom variant with our Hdf5DataPair inside
+        let data = cmp.reopen_data(&pair, &ctx).unwrap();
+        assert!(matches!(data, ReopenedData::Custom(_)));
+
+        // extract "schema" aspect -- exercises the full downcast path
+        let schema = cmp.extract(&data, &node, "schema");
+        assert!(schema.is_some());
+        let text = match schema.unwrap() {
+            ExtractResult::Text(t) => t,
+            _ => panic!("expected Text"),
+        };
+        assert!(text.contains("--- left"));
+        assert!(text.contains("+++ right"));
+        assert!(text.contains("/data/x"));
+        // y only on right side
+        assert!(text.contains("/data/y"));
+
+        // extract "dataset_info" for a child node
+        let child = &node.children[0];
+        let info = cmp.extract(&data, child, "dataset_info");
+        assert!(info.is_some());
+    }
+
+    #[test]
+    fn extract_attributes_via_downcast() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.h5");
+        let b = dir.path().join("b.h5");
+
+        create_test_file(&a, |f| {
+            let ds = f
+                .new_dataset_builder()
+                .with_data(&[1.0f64])
+                .create("values")
+                .unwrap();
+            let attr = ds
+                .new_attr::<f64>()
+                .shape(())
+                .create("scale_factor")
+                .unwrap();
+            attr.write_scalar(&1.0f64).unwrap();
+        });
+        create_test_file(&b, |f| {
+            let ds = f
+                .new_dataset_builder()
+                .with_data(&[1.0f64])
+                .create("values")
+                .unwrap();
+            let attr = ds
+                .new_attr::<f64>()
+                .shape(())
+                .create("scale_factor")
+                .unwrap();
+            attr.write_scalar(&2.0f64).unwrap();
+            let attr2 = ds
+                .new_attr::<f64>()
+                .shape(())
+                .create("offset")
+                .unwrap();
+            attr2.write_scalar(&0.0f64).unwrap();
+        });
+
+        let cmp = Hdf5Comparator;
+        let ctx = CompareContext::new();
+        let pair = make_pair(&a, &b, "test.h5");
+        let result = cmp.compare(&pair, &ctx).unwrap();
+        let node = match result {
+            CompareResult::Leaf(n) => n,
+            _ => panic!("expected Leaf"),
+        };
+
+        // the child node should show the attr change
+        assert_eq!(node.children.len(), 1);
+        assert!(node.children[0].tags.contains("binoc-hdf5.attr-change"));
+
+        // extract attributes via Custom downcast
+        let data = cmp.reopen_data(&pair, &ctx).unwrap();
+        let attrs = cmp.extract(&data, &node.children[0], "attributes");
+        assert!(attrs.is_some());
+        let text = match attrs.unwrap() {
+            ExtractResult::Text(t) => t,
+            _ => panic!("expected Text"),
+        };
+        assert!(text.contains("scale_factor"));
+        assert!(text.contains("offset"));
     }
 
     #[test]
