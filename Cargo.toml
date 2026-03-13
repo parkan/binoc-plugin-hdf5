@@ -7,15 +7,18 @@ license = "MIT"
 
 [lib]
 name = "binoc_plugin_hdf5"
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
 static = ["hdf5/static"]
+python = ["pyo3"]
 
 [dependencies]
-binoc-core = { git = "https://github.com/parkan/binoc.git", branch = "reopened-data-trait" }
+binoc-core = { git = "https://github.com/parkan/binoc.git", branch = "native-plugin-registration" }
 hdf5 = { package = "hdf5-metno", version = "0.12" }
 serde_json = "1.0"
+pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "binoc-plugin-hdf5"
+version = "0.1.0"
+description = "HDF5 comparator plugin for binoc"
+requires-python = ">=3.9"
+dependencies = ["binoc"]
+
+[project.entry-points."binoc.plugins"]
+binoc-plugin-hdf5 = "binoc_plugin_hdf5:register"
+
+[tool.maturin]
+python-source = "python"
+module-name = "binoc_plugin_hdf5._binoc_plugin_hdf5"
+features = ["python"]
