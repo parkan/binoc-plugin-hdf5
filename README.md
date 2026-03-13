@@ -85,7 +85,7 @@ cargo run --example diff_files -- fixtures/satellite-beams-v1.h5 fixtures/satell
 }
 ```
 
-The rename detector works by fingerprinting each group's direct child datasets (name, shape, dtype) and matching removed/added groups with identical fingerprints. It requires the `CustomReopenedData` mechanism in binoc-core to transport typed `Hdf5DataPair` from the comparator to the transformer.
+The rename detector works by fingerprinting each group's direct child datasets (name, shape, dtype, size) and matching removed/added groups with identical fingerprints. It requires the `CustomReopenedData` mechanism in binoc-core to transport typed `Hdf5DataPair` from the comparator to the transformer.
 
 ## Fixtures
 
