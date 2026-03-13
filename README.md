@@ -1,5 +1,7 @@
 # binoc-plugin-hdf5
 
+**WARNING:** EXPERIMENTAL, relies on https://github.com/parkan/binoc/tree/native-plugin-registration, intended to demonstrate utility of plumbing through custom data shapes
+
 HDF5 comparator plugin for [binoc](https://github.com/harvard-lil/binoc). Compares HDF5 file structure -- groups, datasets, shapes, dtypes, and attributes -- without reading bulk data.
 
 Includes a rename detector transformer that collapses noisy add/remove pairs into clean rename nodes when the internal structure of two groups matches.
