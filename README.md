@@ -10,8 +10,6 @@ Requires HDF5 dev headers (`libhdf5-dev` / `hdf5-devel`), or use the `static` fe
 cargo build --features static
 ```
 
-On immutable systems, build in a container (see Dockerfile).
-
 ## Usage
 
 Register the plugin into a binoc `PluginRegistry`:
