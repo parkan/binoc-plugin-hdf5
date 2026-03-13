@@ -14,8 +14,8 @@ use crate::hdf5_compare::{EntryMeta, Hdf5DataPair};
 pub struct Hdf5RenameDetector;
 
 // structural fingerprint of a group: the set of its child datasets
-// identified by relative name, shape, and dtype
-type GroupFingerprint = BTreeSet<(String, Vec<usize>, String)>;
+// identified by (name, shape, dtype, storage_size)
+type GroupFingerprint = BTreeSet<(String, Vec<usize>, String, u64)>;
 
 fn fingerprint_group(
     group_path: &str,
@@ -31,9 +31,12 @@ fn fingerprint_group(
                 return None;
             }
             match meta {
-                EntryMeta::Dataset(ds) => {
-                    Some((suffix.to_string(), ds.shape.clone(), ds.dtype.clone()))
-                }
+                EntryMeta::Dataset(ds) => Some((
+                    suffix.to_string(),
+                    ds.shape.clone(),
+                    ds.dtype.clone(),
+                    ds.storage_size,
+                )),
                 _ => None,
             }
         })
@@ -136,7 +139,7 @@ impl Transformer for Hdf5RenameDetector {
                         .with_tag("binoc-hdf5.group-rename")
                         .with_detail(
                             "datasets",
-                            serde_json::json!(r_fp.iter().map(|(n, _, _)| n).collect::<Vec<_>>()),
+                            serde_json::json!(r_fp.iter().map(|(n, _, _, _)| n).collect::<Vec<_>>()),
                         );
                     renames.push(rename_node);
                     break;

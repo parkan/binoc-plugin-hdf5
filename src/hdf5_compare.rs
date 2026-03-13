@@ -16,6 +16,7 @@ pub(crate) struct DatasetMeta {
     pub(crate) shape: Vec<usize>,
     pub(crate) dtype: String,
     pub(crate) attr_names: Vec<String>,
+    pub(crate) storage_size: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -99,12 +100,14 @@ fn walk_group(
             .map(|dt| format!("{dt}"))
             .unwrap_or_else(|_| "unknown".into());
         let ds_attr_names = ds.attr_names().unwrap_or_default();
+        let storage_size = ds.storage_size();
         entries.insert(
             ds.name(),
             EntryMeta::Dataset(DatasetMeta {
                 shape,
                 dtype,
                 attr_names: ds_attr_names,
+                storage_size,
             }),
         );
     }
