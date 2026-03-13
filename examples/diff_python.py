@@ -11,7 +11,6 @@ Usage:
 import sys
 import json
 import binoc
-import binoc_plugin_hdf5
 
 
 def main():
@@ -21,9 +20,9 @@ def main():
 
     left, right = sys.argv[1], sys.argv[2]
 
-    # set up registry with native HDF5 plugin
+    # build registry with entry-point-discovered plugins (including ours)
     registry = binoc.PluginRegistry.default()
-    binoc_plugin_hdf5.register(registry)
+    binoc.discover_plugins(registry)
 
     # configure to use the HDF5 comparator and rename detector
     config = binoc.Config(
