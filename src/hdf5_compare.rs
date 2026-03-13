@@ -12,20 +12,20 @@ const HDF5_EXTENSIONS: &[&str] = &[".h5", ".he5", ".hdf5", ".hdf", ".nc", ".nc4"
 const HDF5_MEDIA_TYPES: &[&str] = &["application/x-hdf5", "application/x-hdf"];
 
 #[derive(Debug, Clone)]
-struct DatasetMeta {
-    shape: Vec<usize>,
-    dtype: String,
-    attr_names: Vec<String>,
+pub(crate) struct DatasetMeta {
+    pub(crate) shape: Vec<usize>,
+    pub(crate) dtype: String,
+    pub(crate) attr_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
-struct GroupMeta {
-    attr_names: Vec<String>,
-    num_datasets: usize,
+pub(crate) struct GroupMeta {
+    pub(crate) attr_names: Vec<String>,
+    pub(crate) num_datasets: usize,
 }
 
 #[derive(Debug, Clone)]
-enum EntryMeta {
+pub(crate) enum EntryMeta {
     Group(GroupMeta),
     Dataset(DatasetMeta),
 }
@@ -42,8 +42,8 @@ impl EntryMeta {
 // domain-specific data for the extract chain, passed via ReopenedData::Custom
 #[derive(Debug, Clone)]
 pub struct Hdf5DataPair {
-    left: Option<BTreeMap<String, EntryMeta>>,
-    right: Option<BTreeMap<String, EntryMeta>>,
+    pub(crate) left: Option<BTreeMap<String, EntryMeta>>,
+    pub(crate) right: Option<BTreeMap<String, EntryMeta>>,
 }
 
 impl CustomReopenedData for Hdf5DataPair {
